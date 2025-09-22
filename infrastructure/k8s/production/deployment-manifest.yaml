@@ -1,0 +1,744 @@
+# PregnancyCare 360 - Production Deployment Manifest
+# Blue-Green Deployment Strategy with Health Checks and Auto-Scaling
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pregnancycare360-production
+  labels:
+    app: pregnancycare360
+    environment: production
+    version: v1.0.0
+
+---
+# ConfigMap for Production Environment Variables
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pregnancycare360-config
+  namespace: pregnancycare360-production
+data:
+  NODE_ENV: "production"
+  LOG_LEVEL: "info"
+  API_VERSION: "v1"
+  CORS_ORIGIN: "https://app.pregnancycare360.com"
+  SESSION_TIMEOUT: "3600"
+  RATE_LIMIT_WINDOW: "900"
+  RATE_LIMIT_MAX: "1000"
+  CACHE_TTL: "300"
+  DB_POOL_SIZE: "20"
+  DB_TIMEOUT: "30000"
+  REDIS_TTL: "3600"
+  AI_MODEL_VERSION: "1.0.0"
+  FEATURE_FLAGS: "early_detection:true,population_analytics:true,telehealth:false"
+
+---
+# Secret for Sensitive Configuration
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pregnancycare360-secrets
+  namespace: pregnancycare360-production
+type: Opaque
+data:
+  # Base64 encoded secrets (replace with actual values)
+  DATABASE_URL: cG9zdGdyZXNxbDovL3VzZXI6cGFzc0BwcmVnbmFuY3ljYXJlMzYwLXByb2QucG9zdGdyZXMuZGF0YWJhc2UuYXp1cmUuY29tOjU0MzIvcHJlZ25hbmN5Y2FyZTM2MA==
+  REDIS_URL: cmVkaXM6Ly9wcmVnbmFuY3ljYXJlMzYwLXByb2QucmVkaXMuY2FjaGUud2luZG93cy5uZXQ6NjM4MA==
+  JWT_SECRET: c3VwZXJfc2VjdXJlX2p3dF9zZWNyZXRfa2V5XzIwMjU=
+  ENCRYPTION_KEY: YWVzXzI1Nl9lbmNyeXB0aW9uX2tleV9mb3JfaGlwYWE=
+  SENDGRID_API_KEY: U0cuYWJjZGVmZ2hpams=
+  TWILIO_AUTH_TOKEN: dHdpbGlvX2F1dGhfdG9rZW4=
+  AZURE_STORAGE_KEY: YXp1cmVfc3RvcmFnZV9hY2Nlc3Nfa2V5
+
+---
+# API Gateway Deployment (Blue)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway-blue
+  namespace: pregnancycare360-production
+  labels:
+    app: api-gateway
+    version: blue
+    tier: gateway
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: api-gateway
+      version: blue
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+        version: blue
+        tier: gateway
+    spec:
+      containers:
+      - name: api-gateway
+        image: ghcr.io/travis-picou/pregnancycare360-monitoring-api-gateway:main
+        ports:
+        - containerPort: 3000
+          name: http
+        env:
+        - name: PORT
+          value: "3000"
+        envFrom:
+        - configMapRef:
+            name: pregnancycare360-config
+        - secretRef:
+            name: pregnancycare360-secrets
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30
+
+---
+# Patient Service Deployment (Blue)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: patient-service-blue
+  namespace: pregnancycare360-production
+  labels:
+    app: patient-service
+    version: blue
+    tier: service
+spec:
+  replicas: 4
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 2
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: patient-service
+      version: blue
+  template:
+    metadata:
+      labels:
+        app: patient-service
+        version: blue
+        tier: service
+    spec:
+      containers:
+      - name: patient-service
+        image: ghcr.io/travis-picou/pregnancycare360-monitoring-patient-service:main
+        ports:
+        - containerPort: 3001
+          name: http
+        env:
+        - name: PORT
+          value: "3001"
+        - name: SERVICE_NAME
+          value: "patient-service"
+        envFrom:
+        - configMapRef:
+            name: pregnancycare360-config
+        - secretRef:
+            name: pregnancycare360-secrets
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3001
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 3001
+          initialDelaySeconds: 15
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+
+---
+# AI/ML Service Deployment (Blue)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-ml-service-blue
+  namespace: pregnancycare360-production
+  labels:
+    app: ai-ml-service
+    version: blue
+    tier: ai-ml
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: ai-ml-service
+      version: blue
+  template:
+    metadata:
+      labels:
+        app: ai-ml-service
+        version: blue
+        tier: ai-ml
+    spec:
+      containers:
+      - name: ai-ml-service
+        image: ghcr.io/travis-picou/pregnancycare360-monitoring-ai-ml:main
+        ports:
+        - containerPort: 8000
+          name: http
+        env:
+        - name: PORT
+          value: "8000"
+        - name: WORKERS
+          value: "4"
+        - name: MODEL_PATH
+          value: "/app/models"
+        envFrom:
+        - configMapRef:
+            name: pregnancycare360-config
+        - secretRef:
+            name: pregnancycare360-secrets
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 15
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 2
+        volumeMounts:
+        - name: model-storage
+          mountPath: /app/models
+          readOnly: true
+      volumes:
+      - name: model-storage
+        persistentVolumeClaim:
+          claimName: ai-models-pvc
+
+---
+# Provider Service Deployment (Blue)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: provider-service-blue
+  namespace: pregnancycare360-production
+  labels:
+    app: provider-service
+    version: blue
+    tier: service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: provider-service
+      version: blue
+  template:
+    metadata:
+      labels:
+        app: provider-service
+        version: blue
+        tier: service
+    spec:
+      containers:
+      - name: provider-service
+        image: ghcr.io/travis-picou/pregnancycare360-monitoring-provider-service:main
+        ports:
+        - containerPort: 3002
+          name: http
+        envFrom:
+        - configMapRef:
+            name: pregnancycare360-config
+        - secretRef:
+            name: pregnancycare360-secrets
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+
+---
+# Notification Service Deployment (Blue)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-service-blue
+  namespace: pregnancycare360-production
+  labels:
+    app: notification-service
+    version: blue
+    tier: service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: notification-service
+      version: blue
+  template:
+    metadata:
+      labels:
+        app: notification-service
+        version: blue
+        tier: service
+    spec:
+      containers:
+      - name: notification-service
+        image: ghcr.io/travis-picou/pregnancycare360-monitoring-notification-service:main
+        ports:
+        - containerPort: 3003
+          name: http
+        envFrom:
+        - configMapRef:
+            name: pregnancycare360-config
+        - secretRef:
+            name: pregnancycare360-secrets
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+
+---
+# Integration Service Deployment (Blue)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: integration-service-blue
+  namespace: pregnancycare360-production
+  labels:
+    app: integration-service
+    version: blue
+    tier: service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: integration-service
+      version: blue
+  template:
+    metadata:
+      labels:
+        app: integration-service
+        version: blue
+        tier: service
+    spec:
+      containers:
+      - name: integration-service
+        image: ghcr.io/travis-picou/pregnancycare360-monitoring-integration-service:main
+        ports:
+        - containerPort: 3004
+          name: http
+        envFrom:
+        - configMapRef:
+            name: pregnancycare360-config
+        - secretRef:
+            name: pregnancycare360-secrets
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+
+---
+# API Gateway Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway
+  namespace: pregnancycare360-production
+  labels:
+    app: api-gateway
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 80
+    targetPort: 3000
+    protocol: TCP
+    name: http
+  - port: 443
+    targetPort: 3000
+    protocol: TCP
+    name: https
+  selector:
+    app: api-gateway
+    version: blue
+
+---
+# Patient Service Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: patient-service
+  namespace: pregnancycare360-production
+  labels:
+    app: patient-service
+spec:
+  type: ClusterIP
+  ports:
+  - port: 3001
+    targetPort: 3001
+    protocol: TCP
+  selector:
+    app: patient-service
+    version: blue
+
+---
+# AI/ML Service Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-ml-service
+  namespace: pregnancycare360-production
+  labels:
+    app: ai-ml-service
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8000
+    targetPort: 8000
+    protocol: TCP
+  selector:
+    app: ai-ml-service
+    version: blue
+
+---
+# Provider Service Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: provider-service
+  namespace: pregnancycare360-production
+  labels:
+    app: provider-service
+spec:
+  type: ClusterIP
+  ports:
+  - port: 3002
+    targetPort: 3002
+    protocol: TCP
+  selector:
+    app: provider-service
+    version: blue
+
+---
+# Notification Service Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: notification-service
+  namespace: pregnancycare360-production
+  labels:
+    app: notification-service
+spec:
+  type: ClusterIP
+  ports:
+  - port: 3003
+    targetPort: 3003
+    protocol: TCP
+  selector:
+    app: notification-service
+    version: blue
+
+---
+# Integration Service Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: integration-service
+  namespace: pregnancycare360-production
+  labels:
+    app: integration-service
+spec:
+  type: ClusterIP
+  ports:
+  - port: 3004
+    targetPort: 3004
+    protocol: TCP
+  selector:
+    app: integration-service
+    version: blue
+
+---
+# Horizontal Pod Autoscaler for API Gateway
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api-gateway-hpa
+  namespace: pregnancycare360-production
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api-gateway-blue
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+
+---
+# Horizontal Pod Autoscaler for Patient Service
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: patient-service-hpa
+  namespace: pregnancycare360-production
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: patient-service-blue
+  minReplicas: 4
+  maxReplicas: 15
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+
+---
+# Horizontal Pod Autoscaler for AI/ML Service
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ai-ml-service-hpa
+  namespace: pregnancycare360-production
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ai-ml-service-blue
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 75
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 85
+
+---
+# Persistent Volume Claim for AI Models
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ai-models-pvc
+  namespace: pregnancycare360-production
+spec:
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: azure-files-premium
+
+---
+# Network Policy for Security
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pregnancycare360-network-policy
+  namespace: pregnancycare360-production
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: pregnancycare360-production
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: pregnancycare360-production
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 5432
+    - protocol: TCP
+      port: 6379
+
+---
+# Pod Disruption Budget for API Gateway
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api-gateway-pdb
+  namespace: pregnancycare360-production
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: api-gateway
+
+---
+# Pod Disruption Budget for Patient Service
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: patient-service-pdb
+  namespace: pregnancycare360-production
+spec:
+  minAvailable: 3
+  selector:
+    matchLabels:
+      app: patient-service
+
+---
+# Pod Disruption Budget for AI/ML Service
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ai-ml-service-pdb
+  namespace: pregnancycare360-production
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: ai-ml-service
+
+---
+# Ingress for External Access
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pregnancycare360-ingress
+  namespace: pregnancycare360-production
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/rate-limit: "1000"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "30"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "30"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "30"
+spec:
+  tls:
+  - hosts:
+    - api.pregnancycare360.com
+    - app.pregnancycare360.com
+    secretName: pregnancycare360-tls
+  rules:
+  - host: api.pregnancycare360.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: api-gateway
+            port:
+              number: 80
+  - host: app.pregnancycare360.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: api-gateway
+            port:
+              number: 80
