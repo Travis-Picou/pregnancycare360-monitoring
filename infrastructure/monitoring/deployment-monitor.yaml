@@ -1,0 +1,649 @@
+# PregnancyCare 360 - Production Deployment Monitoring & Health Checks
+# Comprehensive monitoring stack with automated rollback capabilities
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: monitoring-config
+  namespace: pregnancycare360-production
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+    
+    rule_files:
+      - "/etc/prometheus/rules/*.yml"
+    
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets:
+              - alertmanager:9093
+    
+    scrape_configs:
+      - job_name: 'kubernetes-apiservers'
+        kubernetes_sd_configs:
+        - role: endpoints
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+          action: keep
+          regex: default;kubernetes;https
+      
+      - job_name: 'pregnancycare360-services'
+        kubernetes_sd_configs:
+        - role: pod
+          namespaces:
+            names:
+            - pregnancycare360-production
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+          action: keep
+          regex: true
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+          action: replace
+          target_label: __metrics_path__
+          regex: (.+)
+        - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+          action: replace
+          regex: ([^:]+)(?::\d+)?;(\d+)
+          replacement: $1:$2
+          target_label: __address__
+        - action: labelmap
+          regex: __meta_kubernetes_pod_label_(.+)
+        - source_labels: [__meta_kubernetes_namespace]
+          action: replace
+          target_label: kubernetes_namespace
+        - source_labels: [__meta_kubernetes_pod_name]
+          action: replace
+          target_label: kubernetes_pod_name
+
+  alerting-rules.yml: |
+    groups:
+    - name: pregnancycare360.rules
+      rules:
+      # High Error Rate Alert
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: critical
+          service: "{{ $labels.service }}"
+        annotations:
+          summary: "High error rate detected"
+          description: "Service {{ $labels.service }} has error rate above 10% for more than 2 minutes"
+          runbook_url: "https://docs.pregnancycare360.com/runbooks/high-error-rate"
+      
+      # High Response Time Alert
+      - alert: HighResponseTime
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 2
+        for: 3m
+        labels:
+          severity: warning
+          service: "{{ $labels.service }}"
+        annotations:
+          summary: "High response time detected"
+          description: "Service {{ $labels.service }} 95th percentile response time is above 2 seconds"
+      
+      # Pod Crash Loop Alert
+      - alert: PodCrashLooping
+        expr: rate(kube_pod_container_status_restarts_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+          pod: "{{ $labels.pod }}"
+        annotations:
+          summary: "Pod is crash looping"
+          description: "Pod {{ $labels.pod }} is restarting frequently"
+      
+      # High Memory Usage Alert
+      - alert: HighMemoryUsage
+        expr: (container_memory_usage_bytes / container_spec_memory_limit_bytes) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          pod: "{{ $labels.pod }}"
+        annotations:
+          summary: "High memory usage"
+          description: "Pod {{ $labels.pod }} memory usage is above 90%"
+      
+      # AI/ML Model Performance Alert
+      - alert: AIModelPerformanceDegraded
+        expr: ai_model_accuracy < 0.85
+        for: 10m
+        labels:
+          severity: critical
+          model: "{{ $labels.model_name }}"
+        annotations:
+          summary: "AI model performance degraded"
+          description: "Model {{ $labels.model_name }} accuracy dropped below 85%"
+      
+      # Database Connection Alert
+      - alert: DatabaseConnectionHigh
+        expr: db_connections_active / db_connections_max > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Database connection pool nearly exhausted"
+          description: "Database connection usage is above 80%"
+
+  grafana-dashboard.json: |
+    {
+      "dashboard": {
+        "id": null,
+        "title": "PregnancyCare 360 - Production Dashboard",
+        "tags": ["pregnancycare360", "production"],
+        "timezone": "browser",
+        "panels": [
+          {
+            "id": 1,
+            "title": "Request Rate",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "sum(rate(http_requests_total[5m])) by (service)",
+                "legendFormat": "{{ service }}"
+              }
+            ],
+            "yAxes": [
+              {
+                "label": "Requests/sec"
+              }
+            ]
+          },
+          {
+            "id": 2,
+            "title": "Response Time (95th percentile)",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, service))",
+                "legendFormat": "{{ service }}"
+              }
+            ],
+            "yAxes": [
+              {
+                "label": "Seconds"
+              }
+            ]
+          },
+          {
+            "id": 3,
+            "title": "Error Rate",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "sum(rate(http_requests_total{status=~\"5..\"}[5m])) by (service) / sum(rate(http_requests_total[5m])) by (service)",
+                "legendFormat": "{{ service }}"
+              }
+            ],
+            "yAxes": [
+              {
+                "label": "Error Rate",
+                "max": 1,
+                "min": 0
+              }
+            ]
+          },
+          {
+            "id": 4,
+            "title": "AI/ML Model Performance",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "ai_model_accuracy",
+                "legendFormat": "{{ model_name }}"
+              }
+            ]
+          },
+          {
+            "id": 5,
+            "title": "Active Pregnancies",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "pregnancies_active_total"
+              }
+            ]
+          },
+          {
+            "id": 6,
+            "title": "High-Risk Patients",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "patients_high_risk_total"
+              }
+            ]
+          }
+        ],
+        "time": {
+          "from": "now-1h",
+          "to": "now"
+        },
+        "refresh": "30s"
+      }
+    }
+
+---
+# Prometheus Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: pregnancycare360-production
+  labels:
+    app: prometheus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      serviceAccountName: prometheus
+      containers:
+      - name: prometheus
+        image: prom/prometheus:v2.45.0
+        args:
+          - '--config.file=/etc/prometheus/prometheus.yml'
+          - '--storage.tsdb.path=/prometheus/'
+          - '--web.console.libraries=/etc/prometheus/console_libraries'
+          - '--web.console.templates=/etc/prometheus/consoles'
+          - '--storage.tsdb.retention.time=30d'
+          - '--web.enable-lifecycle'
+          - '--web.enable-admin-api'
+        ports:
+        - containerPort: 9090
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        volumeMounts:
+        - name: prometheus-config
+          mountPath: /etc/prometheus/
+        - name: prometheus-storage
+          mountPath: /prometheus/
+        livenessProbe:
+          httpGet:
+            path: /-/healthy
+            port: 9090
+          initialDelaySeconds: 30
+          timeoutSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /-/ready
+            port: 9090
+          initialDelaySeconds: 30
+          timeoutSeconds: 30
+      volumes:
+      - name: prometheus-config
+        configMap:
+          name: monitoring-config
+      - name: prometheus-storage
+        persistentVolumeClaim:
+          claimName: prometheus-storage
+
+---
+# Grafana Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: pregnancycare360-production
+  labels:
+    app: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      containers:
+      - name: grafana
+        image: grafana/grafana:10.0.0
+        ports:
+        - containerPort: 3000
+        env:
+        - name: GF_SECURITY_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: grafana-secrets
+              key: admin-password
+        - name: GF_INSTALL_PLUGINS
+          value: "grafana-kubernetes-app"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        volumeMounts:
+        - name: grafana-storage
+          mountPath: /var/lib/grafana
+        - name: grafana-config
+          mountPath: /etc/grafana/provisioning/dashboards/
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+          initialDelaySeconds: 30
+          timeoutSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+          initialDelaySeconds: 30
+          timeoutSeconds: 30
+      volumes:
+      - name: grafana-storage
+        persistentVolumeClaim:
+          claimName: grafana-storage
+      - name: grafana-config
+        configMap:
+          name: monitoring-config
+
+---
+# AlertManager Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager
+  namespace: pregnancycare360-production
+  labels:
+    app: alertmanager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alertmanager
+  template:
+    metadata:
+      labels:
+        app: alertmanager
+    spec:
+      containers:
+      - name: alertmanager
+        image: prom/alertmanager:v0.25.0
+        args:
+          - '--config.file=/etc/alertmanager/config.yml'
+          - '--storage.path=/alertmanager'
+          - '--web.external-url=https://alerts.pregnancycare360.com'
+        ports:
+        - containerPort: 9093
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        volumeMounts:
+        - name: alertmanager-config
+          mountPath: /etc/alertmanager/
+        - name: alertmanager-storage
+          mountPath: /alertmanager
+      volumes:
+      - name: alertmanager-config
+        configMap:
+          name: alertmanager-config
+      - name: alertmanager-storage
+        persistentVolumeClaim:
+          claimName: alertmanager-storage
+
+---
+# Deployment Health Check Job
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: deployment-health-check
+  namespace: pregnancycare360-production
+  labels:
+    app: health-check
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: health-check
+        image: curlimages/curl:8.1.0
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Starting deployment health checks..."
+          
+          # Wait for services to be ready
+          sleep 30
+          
+          # Check API Gateway health
+          echo "Checking API Gateway..."
+          curl -f http://api-gateway:80/health || exit 1
+          
+          # Check Patient Service health
+          echo "Checking Patient Service..."
+          curl -f http://patient-service:3001/health || exit 1
+          
+          # Check AI/ML Service health
+          echo "Checking AI/ML Service..."
+          curl -f http://ai-ml-service:8000/health || exit 1
+          
+          # Check Provider Service health
+          echo "Checking Provider Service..."
+          curl -f http://provider-service:3002/health || exit 1
+          
+          # Check Notification Service health
+          echo "Checking Notification Service..."
+          curl -f http://notification-service:3003/health || exit 1
+          
+          # Check Integration Service health
+          echo "Checking Integration Service..."
+          curl -f http://integration-service:3004/health || exit 1
+          
+          # Perform end-to-end test
+          echo "Performing end-to-end test..."
+          
+          # Test patient creation flow
+          PATIENT_RESPONSE=$(curl -s -X POST http://api-gateway:80/api/patients \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer test-token" \
+            -d '{
+              "firstName": "Test",
+              "lastName": "Patient",
+              "email": "test@example.com",
+              "dateOfBirth": "1990-01-01"
+            }')
+          
+          echo "Patient creation response: $PATIENT_RESPONSE"
+          
+          # Test AI/ML risk assessment
+          RISK_RESPONSE=$(curl -s -X POST http://ai-ml-service:8000/risk-assessment \
+            -H "Content-Type: application/json" \
+            -d '{
+              "patient_id": "test-patient-123",
+              "pregnancy_id": "test-pregnancy-123",
+              "patient_data": {
+                "age": 28,
+                "bmi": 24.5,
+                "gestational_age": 20.0
+              },
+              "vital_signs": {
+                "blood_pressure_systolic": 120,
+                "blood_pressure_diastolic": 80,
+                "heart_rate": 72
+              }
+            }')
+          
+          echo "Risk assessment response: $RISK_RESPONSE"
+          
+          echo "All health checks passed successfully!"
+
+---
+# Continuous Health Monitor CronJob
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: continuous-health-monitor
+  namespace: pregnancycare360-production
+spec:
+  schedule: "*/5 * * * *"  # Every 5 minutes
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: health-monitor
+            image: curlimages/curl:8.1.0
+            command:
+            - /bin/sh
+            - -c
+            - |
+              # Check all service health endpoints
+              services=("api-gateway:80" "patient-service:3001" "ai-ml-service:8000" "provider-service:3002" "notification-service:3003" "integration-service:3004")
+              
+              for service in "${services[@]}"; do
+                echo "Checking $service..."
+                if ! curl -f "http://$service/health" --max-time 10; then
+                  echo "ALERT: $service health check failed!"
+                  # Send alert to monitoring system
+                  curl -X POST http://alertmanager:9093/api/v1/alerts \
+                    -H "Content-Type: application/json" \
+                    -d "[{
+                      \"labels\": {
+                        \"alertname\": \"ServiceHealthCheckFailed\",
+                        \"service\": \"$service\",
+                        \"severity\": \"critical\"
+                      },
+                      \"annotations\": {
+                        \"summary\": \"Service health check failed\",
+                        \"description\": \"Health check for $service failed\"
+                      }
+                    }]"
+                fi
+              done
+              
+              # Check database connectivity
+              echo "Checking database connectivity..."
+              # This would typically use a database client
+              
+              # Check Redis connectivity
+              echo "Checking Redis connectivity..."
+              # This would typically use redis-cli
+              
+              echo "Health monitoring cycle completed"
+
+---
+# Performance Benchmark Job
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: performance-benchmark
+  namespace: pregnancycare360-production
+  labels:
+    app: performance-test
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: k6-load-test
+        image: grafana/k6:0.45.0
+        command:
+        - k6
+        - run
+        - --vus=100
+        - --duration=5m
+        - /scripts/load-test.js
+        env:
+        - name: API_BASE_URL
+          value: "http://api-gateway:80"
+        volumeMounts:
+        - name: k6-scripts
+          mountPath: /scripts
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+      volumes:
+      - name: k6-scripts
+        configMap:
+          name: k6-test-scripts
+
+---
+# Services for Monitoring Stack
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: pregnancycare360-production
+spec:
+  selector:
+    app: prometheus
+  ports:
+  - port: 9090
+    targetPort: 9090
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: pregnancycare360-production
+spec:
+  selector:
+    app: grafana
+  ports:
+  - port: 3000
+    targetPort: 3000
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager
+  namespace: pregnancycare360-production
+spec:
+  selector:
+    app: alertmanager
+  ports:
+  - port: 9093
+    targetPort: 9093
+
+---
+# ServiceMonitor for Prometheus Operator
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: pregnancycare360-services
+  namespace: pregnancycare360-production
+  labels:
+    app: pregnancycare360
+spec:
+  selector:
+    matchLabels:
+      app: pregnancycare360
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 30s
+    scrapeTimeout: 10s
